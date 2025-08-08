@@ -150,7 +150,8 @@ async def run_agent(questions: str, files: List[UploadFile]) -> Any:
                        "3. Call the necessary tools with the correct parameters. When using a tool that needs a dataframe, "
                        "refer to it by its name in the `data_context` (e.g., 'scraped_data' or 'my_data.csv').\n"
                        "4. The results of tool calls will be dataframes or other values. You can then use other tools on this data.\n"
-                       "5. When you have all the information, provide the final answer in the precise JSON format requested by the user. "
+                       "5. IMPORTANT: If a tool call results in an error, stop immediately and report the error. Do not proceed with the plan.\n"
+                       "6. When you have all the information, provide the final answer in the precise JSON format requested by the user. "
                        "Do not say anything else, just the final JSON."
         },
         {
@@ -199,21 +200,28 @@ async def run_agent(questions: str, files: List[UploadFile]) -> Any:
             try:
                 function_args = json.loads(tool_call.function.arguments)
 
-                # Special handling for functions that require a DataFrame
+                # Special handling for functions that require a DataFrame from our context
                 if "df_name" in function_args:
                     df_name = function_args.pop("df_name")
                     if df_name not in data_context:
                         raise ValueError(f"DataFrame '{df_name}' not found in data context.")
                     function_args['df'] = data_context[df_name]
 
+                # Special handling for DuckDB to provide the full data context
+                if function_name == 'run_duckdb_query':
+                    function_args['data_context'] = data_context
+
                 # Call the actual tool function
                 function_response = function_to_call(**function_args)
+
+                logger.info(f"Successfully executed tool '{function_name}'")
 
                 # If the function returns a DataFrame, save it to our context
                 # and give the LLM a summary instead of the whole DataFrame.
                 tool_output_for_llm = ""
                 if isinstance(function_response, pd.DataFrame):
-                    new_df_name = f"{function_name}_result"
+                    # Give the result a unique name in the context
+                    new_df_name = f"{function_name}_result_{tool_call.id[:4]}"
                     data_context[new_df_name] = function_response
                     tool_output_for_llm = (f"Tool '{function_name}' executed successfully and returned a DataFrame with "
                                            f"shape {function_response.shape}. It is now available as '{new_df_name}'.\n"
@@ -231,7 +239,6 @@ async def run_agent(questions: str, files: List[UploadFile]) -> Any:
                         "content": tool_output_for_llm,
                     }
                 )
-                logger.info(f"Successfully executed tool '{function_name}'")
 
             except Exception as e:
                 logger.error(f"Error executing tool {function_name}: {e}")
