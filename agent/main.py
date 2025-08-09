@@ -68,11 +68,24 @@ def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, An
         # Convert numpy types to Python types for JSON serialization
         def convert_numpy_types(obj):
             if hasattr(obj, 'item'):  # numpy scalar
-                return obj.item()
+                value = obj.item()
+                # Handle NaN and infinity values
+                if isinstance(value, float):
+                    if np.isnan(value):
+                        return None
+                    elif np.isinf(value):
+                        return "infinity" if value > 0 else "-infinity"
+                return value
             elif isinstance(obj, dict):
                 return {k: convert_numpy_types(v) for k, v in obj.items()}
             elif isinstance(obj, list):
                 return [convert_numpy_types(v) for v in obj]
+            elif isinstance(obj, float):
+                # Handle regular Python float NaN and infinity
+                if np.isnan(obj):
+                    return None
+                elif np.isinf(obj):
+                    return "infinity" if obj > 0 else "-infinity"
             return obj
         
         result = exec_globals.get('result')
@@ -250,7 +263,7 @@ Your capabilities:
 Code Templates:
 
 # Correlation example:
-# df = data_context['dataset_name']
+# df = data_context['filename.csv']  # Use actual filename from data_context keys
 # df['col1'] = pd.to_numeric(df['col1'], errors='coerce')
 # df['col2'] = pd.to_numeric(df['col2'], errors='coerce')
 # correlation = df['col1'].corr(df['col2'])
@@ -270,7 +283,7 @@ Code Templates:
 # result['sum'] = df['column'].sum()
 
 IMPORTANT:
-- Access data using data_context['dataset_name']
+- Access data using data_context['filename.csv'] where the key is the actual filename
 - Store analysis results in a 'result' dictionary
 - Handle missing values and data type conversions
 - Use error handling for robust calculations
@@ -425,13 +438,17 @@ async def run_agent(questions: str, files: List[UploadFile]) -> Any:
             else:
                 data_info.append(f"- {name}: {type(df).__name__}")
         
+        # Get available dataset keys for the prompt
+        available_keys_analysis = [f"'{key}'" for key in data_context.keys() if isinstance(data_context[key], pd.DataFrame)]
+        keys_info_analysis = f"Available data_context keys: {', '.join(available_keys_analysis)}" if available_keys_analysis else "No DataFrame data available"
+        
         analysis_messages = [
             {"role": "system", "content": DATA_ANALYSIS_PROMPT},
             {
                 "role": "user",
                 "content": f"Questions:\n{questions}\n\nAvailable data:\n" + 
                           "\n".join(data_info) +
-                          "\n\nWrite Python code to analyze the data and answer the questions. Use the EXACT column names shown above."
+                          f"\n\n{keys_info_analysis}\n\nWrite Python code to analyze the data and answer the questions. Use the EXACT column names shown above and access data using data_context[key] where key is one of the available keys."
             }
         ]
         
@@ -466,13 +483,17 @@ async def run_agent(questions: str, files: List[UploadFile]) -> Any:
             else:
                 data_info_detailed.append(f"- {name}: {type(df).__name__}")
         
+        # Get available dataset keys for the prompt
+        available_keys = [f"'{key}'" for key in data_context.keys() if isinstance(data_context[key], pd.DataFrame)]
+        keys_info = f"Available data_context keys: {', '.join(available_keys)}" if available_keys else "No DataFrame data available"
+        
         presentation_messages = [
             {"role": "system", "content": PRESENTATION_PROMPT},
             {
                 "role": "user",
                 "content": f"Questions:\n{questions}\n\nAnalysis results:\n{json.dumps(analysis_results, default=str)}\n\nAvailable data:\n" +
                           "\n".join(data_info_detailed) +
-                          "\n\nIMPORTANT: \n- Use data_context['dataset_name'] to access data - NEVER read from files!\n- Store your final result in the 'result' variable as a Python dictionary\n- Do NOT call json.dumps() - just create the dictionary\n- Convert numpy types to Python types (use int() and float())\n\nWrite Python code to create visualizations and format the final result dictionary."
+                          f"\n\n{keys_info}\n\nIMPORTANT: \n- Use data_context[key] to access data where 'key' is one of the available keys listed above - NEVER read from files!\n- Store your final result in the 'result' variable as a Python dictionary\n- Do NOT call json.dumps() - just create the dictionary\n- Convert numpy types to Python types (use int() and float())\n\nWrite Python code to create visualizations and format the final result dictionary."
             }
         ]
         
