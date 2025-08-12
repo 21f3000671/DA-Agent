@@ -1,11 +1,11 @@
-def handler(request):
-    """
-    Ultra minimal handler for Vercel debugging
-    """
-    return {
-        "statusCode": 200,
-        "headers": {
-            "Content-Type": "application/json"
-        },
-        "body": '{"message": "Ultra minimal test working", "status": "ok"}'
-    }
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+async def home():
+    return {"message": "FastAPI minimal test working", "status": "ok"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "requirements": "minimal"}

@@ -1,13 +1,3 @@
-# Core dependencies - minimal set for Vercel
-fastapi==0.116.1
-python-multipart==0.0.20
-openai==1.99.3
-requests==2.32.4
-beautifulsoup4==4.13.4
-pandas==2.3.1
-python-dotenv==1.1.1
-uvicorn==0.35.0
-
-# Lightweight alternatives to heavy packages
-# Note: matplotlib, seaborn, sklearn, duckdb are imported conditionally
-# and can fallback gracefully if not available
+# Minimal requirements for testing
+fastapi
+uvicorn
