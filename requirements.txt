@@ -1,5 +1,19 @@
-# Essential requirements for basic functionality
-fastapi
-uvicorn
-python-multipart
-python-dotenv
+# Core dependencies for full DA-Agent functionality
+fastapi==0.116.1
+python-multipart==0.0.20
+openai==1.99.3
+requests==2.32.4
+beautifulsoup4==4.13.4
+pandas==2.3.1
+python-dotenv==1.1.1
+uvicorn==0.35.0
+
+# Essential data analysis dependencies
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+scikit-learn>=1.3.0
+
+# Optional heavy dependencies (will gracefully degrade if not available)
+# duckdb>=1.0.0  # Commented out to stay under size limit
+# networkx>=3.0  # Commented out to stay under size limit
