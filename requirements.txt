@@ -1,4 +1,4 @@
-# Core dependencies for DA-Agent (staying under 250MB)
+# Minimal dependencies for Vercel deployment (under 250MB limit)
 fastapi==0.116.1
 python-multipart==0.0.20
 openai==1.99.3
@@ -8,13 +8,7 @@ pandas==2.3.1
 python-dotenv==1.1.1
 uvicorn==0.35.0
 
-# Minimal data analysis dependencies (lightweight versions)
-numpy>=1.24.0
-
-# Heavy dependencies - commented out for Vercel deployment
-# These will be handled with graceful degradation in the agent
-# matplotlib>=3.7.0
-# seaborn>=0.12.0
-# scikit-learn>=1.3.0
-# duckdb>=1.0.0
-# networkx>=3.0
+# All data analysis dependencies are handled with graceful degradation
+# Agent will work with basic pandas operations and web scraping
+# Heavy packages (numpy, matplotlib, seaborn, sklearn, duckdb, networkx) 
+# will be imported conditionally and fallback gracefully if not available
