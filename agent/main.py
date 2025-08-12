@@ -5,8 +5,11 @@ import logging
 import os
 import io
 import traceback
+import re
+import requests
 from typing import List, Dict, Any
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 # Load environment variables from .env file
 load_dotenv()
@@ -17,6 +20,176 @@ from fastapi import UploadFile
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def detect_urls(text: str) -> List[str]:
+    """
+    Detect URLs in the given text using regex patterns.
+    Returns a list of detected URLs.
+    """
+    url_pattern = re.compile(
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+    )
+    urls = url_pattern.findall(text)
+    logger.info(f"Detected URLs: {urls}")
+    return urls
+
+def scrape_web_data(url: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Tool function for web scraping that the LLM can call.
+    Attempts to scrape tables from the given URL and stores them in data_context.
+    """
+    try:
+        logger.info(f"Attempting to scrape data from: {url}")
+        
+        # Try multiple methods to get tables
+        scraped_data = []
+        
+        # Method 1: pandas.read_html (most common for tables)
+        try:
+            tables = pd.read_html(url)
+            for i, table in enumerate(tables):
+                # Clean and process the table
+                table = clean_scraped_dataframe(table)
+                table_name = f"scraped_table_{i+1}"
+                data_context[table_name] = table
+                scraped_data.append({
+                    'name': table_name,
+                    'shape': table.shape,
+                    'columns': list(table.columns)
+                })
+                logger.info(f"Scraped table {i+1} with shape {table.shape}")
+        except Exception as e:
+            logger.warning(f"pandas.read_html failed: {e}")
+        
+        # Method 2: BeautifulSoup for more complex scraping if pandas failed
+        if not scraped_data:
+            try:
+                response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+                soup = BeautifulSoup(response.content, 'html.parser')
+                tables = soup.find_all('table')
+                
+                for i, table in enumerate(tables):
+                    df = parse_html_table_to_dataframe(table)
+                    if df is not None and not df.empty:
+                        df = clean_scraped_dataframe(df)
+                        table_name = f"scraped_table_{i+1}"
+                        data_context[table_name] = df
+                        scraped_data.append({
+                            'name': table_name,
+                            'shape': df.shape,
+                            'columns': list(df.columns)
+                        })
+                        logger.info(f"Scraped table {i+1} with BeautifulSoup, shape {df.shape}")
+            except Exception as e:
+                logger.warning(f"BeautifulSoup scraping failed: {e}")
+        
+        if scraped_data:
+            return {
+                'success': True,
+                'data_context': data_context,
+                'scraped_tables': scraped_data,
+                'error': None
+            }
+        else:
+            return {
+                'success': False,
+                'data_context': data_context,
+                'scraped_tables': [],
+                'error': f"No tables found at {url}"
+            }
+            
+    except Exception as e:
+        logger.error(f"Web scraping failed for {url}: {e}")
+        return {
+            'success': False,
+            'data_context': data_context,
+            'scraped_tables': [],
+            'error': str(e)
+        }
+
+def clean_scraped_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Clean and process scraped dataframes to handle data type issues.
+    """
+    # Create a copy to avoid modifying the original
+    df = df.copy()
+    
+    # Handle unnamed columns
+    df.columns = [f"col_{i}" if str(col).startswith('Unnamed:') else str(col) for i, col in enumerate(df.columns)]
+    
+    # Convert all columns to string first to handle mixed types
+    for col in df.columns:
+        df[col] = df[col].astype(str)
+    
+    # Try to convert numeric columns safely
+    for col in df.columns:
+        try:
+            # Try numeric conversion, but keep as string if it fails
+            numeric_col = pd.to_numeric(df[col], errors='coerce')
+            # Only convert if most values are numeric (>50%) and not all are NaN
+            valid_numerics = numeric_col.notna().sum()
+            if valid_numerics > 0 and valid_numerics > len(df) * 0.5:
+                df[col] = numeric_col
+        except Exception as e:
+            logger.warning(f"Could not process column {col} for numeric conversion: {e}")
+            # Keep as string if any error occurs
+            continue
+    
+    # Remove completely empty rows and columns
+    df = df.dropna(how='all')
+    df = df.loc[:, df.notna().any()]
+    
+    # Handle any remaining issues with string operations
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            try:
+                # Ensure all values in object columns are strings
+                df[col] = df[col].fillna('').astype(str)
+            except Exception as e:
+                logger.warning(f"Could not clean column {col}: {e}")
+                continue
+    
+    return df
+
+def parse_html_table_to_dataframe(table) -> pd.DataFrame:
+    """
+    Parse HTML table element to DataFrame using BeautifulSoup.
+    """
+    try:
+        rows = []
+        header_row = table.find('tr')
+        
+        # Extract headers
+        headers = []
+        if header_row:
+            for th in header_row.find_all(['th', 'td']):
+                headers.append(th.get_text(strip=True))
+        
+        # Extract data rows
+        for row in table.find_all('tr')[1:]:  # Skip header row
+            row_data = []
+            for cell in row.find_all(['td', 'th']):
+                row_data.append(cell.get_text(strip=True))
+            if row_data:  # Only add non-empty rows
+                rows.append(row_data)
+        
+        if rows and headers:
+            # Ensure all rows have the same number of columns
+            max_cols = max(len(headers), max(len(row) for row in rows) if rows else 0)
+            headers = headers + [f"col_{i}" for i in range(len(headers), max_cols)]
+            
+            # Pad rows to match header length
+            padded_rows = []
+            for row in rows:
+                padded_row = row + [''] * (max_cols - len(row))
+                padded_rows.append(padded_row[:max_cols])  # Trim if too long
+            
+            return pd.DataFrame(padded_rows, columns=headers[:max_cols])
+        
+        return pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Failed to parse HTML table: {e}")
+        return pd.DataFrame()
 
 def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -55,8 +228,16 @@ def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, An
             'LinearRegression': LinearRegression,
             'nx': nx,
             'networkx': nx,
+            're': re,
             'data_context': data_context,
-            'result': None
+            'result': None,
+            # Add questions variable if available
+            'questions': data_context.get('questions', ''),
+            # Helper functions for web scraping
+            'detect_urls': detect_urls,
+            'scrape_web_data': scrape_web_data,
+            'clean_scraped_dataframe': clean_scraped_dataframe,
+            'parse_html_table_to_dataframe': parse_html_table_to_dataframe
         }
         
         # Set matplotlib to non-interactive backend
@@ -67,26 +248,38 @@ def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, An
         
         # Convert numpy types to Python types for JSON serialization
         def convert_numpy_types(obj):
-            if hasattr(obj, 'item'):  # numpy scalar
-                value = obj.item()
-                # Handle NaN and infinity values
-                if isinstance(value, float):
-                    if np.isnan(value):
-                        return None
-                    elif np.isinf(value):
-                        return "infinity" if value > 0 else "-infinity"
-                return value
-            elif isinstance(obj, dict):
-                return {k: convert_numpy_types(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_numpy_types(v) for v in obj]
-            elif isinstance(obj, float):
-                # Handle regular Python float NaN and infinity
-                if np.isnan(obj):
+            try:
+                if obj is None:
                     return None
-                elif np.isinf(obj):
-                    return "infinity" if obj > 0 else "-infinity"
-            return obj
+                elif hasattr(obj, 'item'):  # numpy scalar
+                    value = obj.item()
+                    # Handle NaN and infinity values
+                    if isinstance(value, float):
+                        if np.isnan(value):
+                            return None
+                        elif np.isinf(value):
+                            return "infinity" if value > 0 else "-infinity"
+                    return value
+                elif isinstance(obj, dict):
+                    return {k: convert_numpy_types(v) for k, v in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [convert_numpy_types(v) for v in obj]
+                elif isinstance(obj, float):
+                    # Handle regular Python float NaN and infinity
+                    if np.isnan(obj):
+                        return None
+                    elif np.isinf(obj):
+                        return "infinity" if obj > 0 else "-infinity"
+                    return obj
+                elif hasattr(obj, 'to_dict'):  # pandas objects like Series, DataFrame
+                    return str(obj)  # Convert to string representation
+                elif hasattr(obj, 'tolist'):  # numpy arrays
+                    return convert_numpy_types(obj.tolist())
+                else:
+                    return obj
+            except Exception as e:
+                logger.warning(f"Could not convert object of type {type(obj)}: {e}")
+                return str(obj)
         
         result = exec_globals.get('result')
         if result is not None:
@@ -100,14 +293,25 @@ def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, An
             'error': None
         }
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Code execution failed: {e}")
         logger.error(f"Code that failed:\n{code}")
         logger.error(f"Traceback:\n{traceback.format_exc()}")
+        
+        # Provide more helpful error messages for common issues
+        if "Can only use .str accessor with string values" in error_msg:
+            error_msg = (
+                "Error: Attempted to use .str accessor on non-string data. "
+                "Make sure to check data types before using string methods. "
+                "Use df[col].dtype == 'object' to check for string columns, "
+                "or convert explicitly with df[col].astype(str) before using .str methods."
+            )
+        
         return {
             'success': False,
             'data_context': data_context,
             'result': None,
-            'error': str(e)
+            'error': error_msg
         }
 
 # Get LLM configuration from environment variables
@@ -208,20 +412,45 @@ Available imports and libraries:
 - duckdb
 - json
 - io
+- re (for URL detection)
+
+Available helper functions:
+- detect_urls(text): Detects URLs in text and returns a list
+- scrape_web_data(url, data_context): Scrapes tables from a URL and adds them to data_context
 
 Your capabilities:
-1. **Web Scraping**: Use requests + BeautifulSoup or pandas.read_html() to scrape tables from websites
-2. **File Processing**: Read CSV, JSON, and other data files using pandas
-3. **Database Queries**: Use DuckDB for SQL queries on large datasets or remote parquet files
-4. **Data Loading**: Process uploaded files and create DataFrames
+1. **Automatic URL Detection & Scraping**: Detect URLs in questions and automatically scrape data when no CSV files are provided
+2. **Web Scraping**: Use the scrape_web_data() helper function or pandas.read_html() to scrape tables from websites
+3. **File Processing**: Read CSV, JSON, and other data files using pandas
+4. **Database Queries**: Use DuckDB for SQL queries on large datasets or remote parquet files
+5. **Data Loading**: Process uploaded files and create DataFrames
 
 Code Templates:
 
-# Web scraping example:
-# import requests
-# import pandas as pd
+# MANDATORY CODE TEMPLATE - Copy this exactly and do NOT add analysis code:
+detected_urls = detect_urls(questions)
+if detected_urls:
+    for url in detected_urls:
+        scrape_result = scrape_web_data(url, data_context)
+        if scrape_result['success']:
+            data_context = scrape_result['data_context']
+            # Log what was scraped
+            scraped_info = []
+            for table_info in scrape_result['scraped_tables']:
+                scraped_info.append(f"{table_info['name']}: {table_info['shape']}")
+            result = f"Successfully scraped {len(scrape_result['scraped_tables'])} tables: {', '.join(scraped_info)}"
+        else:
+            result = f"Failed to scrape {url}: {scrape_result['error']}"
+
+# Direct web scraping example:
 # tables = pd.read_html(url)
-# data_context['scraped_data'] = tables[0]
+# # Clean data safely
+# for i, table in enumerate(tables):
+#     # Safe numeric conversion
+#     for col in table.columns:
+#         if table[col].dtype == 'object':
+#             table[col] = pd.to_numeric(table[col], errors='coerce')
+#     data_context[f'scraped_table_{i+1}'] = table
 
 # DuckDB query example:
 # import duckdb
@@ -233,12 +462,17 @@ Code Templates:
 # df = pd.read_csv('filename.csv')
 # data_context['processed_data'] = df
 
-IMPORTANT: 
-- Store all DataFrames in the 'data_context' dictionary with descriptive names
-- Use safe type conversions: pd.to_numeric(col, errors='coerce')
-- Handle errors gracefully
-- Set 'result' variable to a summary of what data was gathered
+CRITICAL RULES: 
+- ONLY USE THE MANDATORY CODE TEMPLATE ABOVE - copy it exactly as written
+- DO NOT ADD ANY DATA ANALYSIS OR PROCESSING CODE in this stage
+- DO NOT access or modify individual columns or values
+- DO NOT try to answer questions or perform calculations here  
+- DO NOT use iloc, loc, filtering, or data manipulation
+- ONLY scrape data and store it in data_context using the exact template
+- Set 'result' variable to the scraping summary only
+- Data analysis happens in the next stage, NOT here
 - Your code should be complete and executable
+- VIOLATION OF THESE RULES WILL CAUSE SYSTEM FAILURE
 
 Write Python code to gather the required data. End your response with the code block only.
 """
@@ -262,20 +496,46 @@ Your capabilities:
 
 Code Templates:
 
-# Correlation example:
+# Correlation example (handling missing values):
 # df = data_context['filename.csv']  # Use actual filename from data_context keys
 # df['col1'] = pd.to_numeric(df['col1'], errors='coerce')
 # df['col2'] = pd.to_numeric(df['col2'], errors='coerce')
-# correlation = df['col1'].corr(df['col2'])
-# result['correlation'] = correlation
+# # Drop rows where either column has missing values
+# df_clean = df[['col1', 'col2']].dropna()
+# if len(df_clean) > 1:
+#     correlation = df_clean['col1'].corr(df_clean['col2'])
+#     result['correlation'] = correlation
+# else:
+#     result['correlation'] = None
 
-# Linear regression example:
+# Linear regression with safe data access:
 # from sklearn.linear_model import LinearRegression
-# X = df[['x_column']].dropna()
-# y = df['y_column'].dropna()
-# model = LinearRegression().fit(X, y)
-# result['slope'] = model.coef_[0]
-# result['intercept'] = model.intercept_
+# df = data_context['scraped_table_1']  # Use actual table name
+# # Ensure both columns are numeric and clean missing values
+# df['x_column'] = pd.to_numeric(df['x_column'], errors='coerce') 
+# df['y_column'] = pd.to_numeric(df['y_column'], errors='coerce')
+# # Drop rows where either column has missing values
+# df_clean = df[['x_column', 'y_column']].dropna()
+# if len(df_clean) > 1:
+#     X = df_clean[['x_column']]
+#     y = df_clean['y_column']
+#     model = LinearRegression().fit(X, y)
+#     result['slope'] = model.coef_[0]
+#     result['intercept'] = model.intercept_
+# else:
+#     result['slope'] = None
+#     result['intercept'] = None
+
+# Safe data filtering example:
+# df = data_context['scraped_table_1']
+# # Convert to numeric safely
+# df['numeric_col'] = pd.to_numeric(df['numeric_col'], errors='coerce')
+# # Filter with safety check
+# filtered = df[df['numeric_col'] > threshold]
+# if len(filtered) > 0:
+#     result_value = filtered.iloc[0]['some_column']
+# else:
+#     result_value = "No data found matching criteria"
 
 # Statistical calculations:
 # result['mean'] = df['column'].mean()
@@ -283,17 +543,26 @@ Code Templates:
 # result['sum'] = df['column'].sum()
 
 IMPORTANT:
-- Access data using data_context['filename.csv'] where the key is the actual filename
+- Access scraped data using data_context['scraped_table_1'] or appropriate scraped table name
 - Store analysis results in a 'result' dictionary
-- Handle missing values and data type conversions
-- Use error handling for robust calculations
+- ALWAYS check if filtered data is empty before using iloc[0] - use len(filtered) > 0
+- ALWAYS handle missing values by using .dropna() on the relevant columns before analysis
+- ALWAYS ensure consistent sample sizes when doing correlations or regression
+- Use pd.to_numeric(column, errors='coerce') for safe numeric conversion
+- Use error handling for robust calculations and provide fallback values
+- Check that you have enough data points (>1) before performing analysis
+- When filtering data, always check if results exist before accessing with iloc
+- NEVER use .str accessor without first checking column data type
+- Check column dtypes with df[col].dtype before string operations
 - Your code should be complete and executable
 
 Write Python code to perform the required analysis. End your response with the code block only.
 """
 
 PRESENTATION_PROMPT = """
-You are a Data Presentation Specialist. Your task is to write Python code to create visualizations and format the final output as JSON.
+You are a Data Presentation Specialist. Your task is to create a final response that directly answers the original questions with supporting visualizations.
+
+GOAL: Structure the response as a question-answering system, not a generic data report.
 
 Available imports and libraries:
 - matplotlib.pyplot as plt (set to Agg backend)
@@ -303,47 +572,47 @@ Available imports and libraries:
 - json for output formatting
 - io for handling image buffers
 
-Your capabilities:
-1. **Visualizations**: Scatter plots, bar charts, line plots, histograms
-2. **Plot Customization**: Colors, labels, titles, legends, styling
-3. **Image Encoding**: Convert plots to base64 data URI strings
-4. **JSON Formatting**: Structure final results according to requirements
+RESPONSE FORMAT:
+Structure the result as a dictionary with:
+- "questions": List of original questions
+- "answers": List of direct answers corresponding to each question  
+- "analysis_summary": Brief summary of analysis performed
+- "visualizations": Charts that support the answers (if relevant)
+- "data_insights": Key insights derived from the data
+- "recommendations": Suggestions for more specific questions (if original questions were vague)
 
-Code Templates:
+ANSWER EXAMPLES:
 
-# Basic plot with base64 encoding:
-# plt.figure(figsize=(10, 6))
-# plt.plot(data, color='red', linestyle='-')
-# plt.title('Chart Title')
-# plt.xlabel('X Label')
-# plt.ylabel('Y Label')
-# 
-# buffer = io.BytesIO()
-# plt.savefig(buffer, format='png', bbox_inches='tight', dpi=100)
-# plt.close()
-# buffer.seek(0)
-# img_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-# result['chart'] = f"data:image/png;base64,{img_base64}"
+For question "What is the average sales?":
+- Answer: "The average sales across all records is $X,XXX"
+- Visualization: Bar chart showing sales distribution
 
-# Bar chart example:
-# plt.figure(figsize=(8, 6))
-# plt.bar(categories, values, color='blue')
-# plt.title('Title')
+For vague question "This is a test question":
+- Answer: "This question is too general to provide specific insights. Based on the available data with columns [col1, col2], I can provide a basic data overview."
+- Recommendation: "For more meaningful analysis, consider asking: 'What is the relationship between col1 and col2?' or 'What are the summary statistics for this dataset?'"
 
-# Scatter plot with regression line:
-# plt.figure(figsize=(8, 6))
-# plt.scatter(x, y, alpha=0.6)
-# plt.plot(x, regression_line, color='red', linestyle='--')
+VISUALIZATION GUIDELINES:
+- Only create charts that directly support your answers
+- Use descriptive titles that relate to the questions
+- Keep image sizes under 100kB
+- Always use plt.close() after saving plots
+
+DATA SAFETY RULES:
+- NEVER use .str accessor on columns without first checking if they are string type
+- Always check column dtypes before string operations: df[col].dtype == 'object'
+- Convert to string explicitly if needed: df[col].astype(str) before using .str
+- Handle mixed data types safely with pd.to_numeric() or astype()
+- Use error handling for all data type operations
 
 IMPORTANT:
-- Keep image sizes under 100kB by using reasonable figure sizes and DPI
-- Always use plt.close() after saving plots to free memory
-- Encode images as base64 data URI: f"data:image/png;base64,{base64_string}"
-- Structure final output as valid JSON matching the required format
-- Set 'result' variable to the final JSON structure
-- Your code should be complete and executable
+- Directly address each original question in your answers
+- If questions can't be answered with available data, explain why
+- Provide alternative questions that could be answered
+- Structure as question-answer pairs, not generic statistical output
+- Set 'result' variable to the final structured dictionary
+- NEVER use .str accessor without type checking first
 
-Write Python code to create visualizations and format the final JSON output. End your response with the code block only.
+Write Python code to create a question-focused response with supporting visualizations. End your response with the code block only.
 """
 
 # The main three-stage agent orchestrator function
@@ -392,19 +661,54 @@ async def run_agent(questions: str, files: List[UploadFile]) -> Any:
         # STAGE 1: DATA GATHERING
         logger.info("=== STAGE 1: DATA GATHERING ===")
         
-        # Skip data gathering if we already have sufficient data loaded
+        # Check for URLs in questions and determine if we need data gathering
+        detected_urls = detect_urls(questions)
+        has_csv_files = any(filename.endswith('.csv') for filename in file_info)
+        
+        # Trigger data gathering if:
+        # 1. No data context yet, OR
+        # 2. URLs detected in questions, OR 
+        # 3. Keywords indicating web scraping needed
         needs_additional_data = (
             not data_context or 
+            detected_urls or
             any(keyword in questions.lower() for keyword in ['scrape', 'fetch', 'url', 'web', 'http'])
         )
         
+        logger.info(f"URLs detected: {detected_urls}")
+        logger.info(f"Has CSV files: {has_csv_files}")
+        logger.info(f"Needs additional data: {needs_additional_data}")
+        
         if needs_additional_data:
+            # Prepare information for the gathering stage
+            url_info = f"Detected URLs: {detected_urls}" if detected_urls else "No URLs detected"
+            data_gathering_context = f"""
+Questions:
+{questions}
+
+{url_info}
+Files provided: {', '.join(file_info)}
+Has CSV files: {has_csv_files}
+
+Existing data context:
+{data_summary}
+
+INSTRUCTIONS:
+- If URLs are detected and no CSV files provided, use detect_urls(questions) and scrape_web_data() to get data
+- The 'questions' variable contains the full questions text for URL detection
+- Use this pattern: 
+  detected_urls = detect_urls(questions)
+  for url in detected_urls:
+      scrape_result = scrape_web_data(url, data_context)
+      if scrape_result['success']:
+          data_context = scrape_result['data_context']
+- Store all scraped data in data_context with descriptive names
+- Use safe data type handling to avoid conversion errors
+- NOTE: Uploaded files are already available in data_context."""
+
             gathering_messages = [
                 {"role": "system", "content": DATA_GATHERING_PROMPT},
-                {
-                    "role": "user", 
-                    "content": f"Questions:\n{questions}\n\nFiles provided: {', '.join(file_info)}\n\nExisting data context:\n{data_summary}\n\nWrite Python code to gather any additional data needed. NOTE: Uploaded files are already available in data_context."
-                }
+                {"role": "user", "content": data_gathering_context}
             ]
             
             response = client.chat.completions.create(
@@ -415,7 +719,11 @@ async def run_agent(questions: str, files: List[UploadFile]) -> Any:
             gathering_code = extract_code_from_response(response.choices[0].message.content)
             if gathering_code:
                 logger.info("Executing data gathering code...")
-                exec_result = execute_python_code(gathering_code, data_context)
+                logger.info(f"Generated code:\n{gathering_code}")
+                # Create a copy of data_context and add questions for helper functions
+                gathering_context = data_context.copy()
+                gathering_context['questions'] = questions
+                exec_result = execute_python_code(gathering_code, gathering_context)
                 if exec_result['success']:
                     data_context = exec_result['data_context']
                     logger.info(f"Data gathering completed. New data_context keys: {list(data_context.keys())}")
@@ -487,11 +795,38 @@ async def run_agent(questions: str, files: List[UploadFile]) -> Any:
         available_keys = [f"'{key}'" for key in data_context.keys() if isinstance(data_context[key], pd.DataFrame)]
         keys_info = f"Available data_context keys: {', '.join(available_keys)}" if available_keys else "No DataFrame data available"
         
+        # Safely serialize analysis results
+        def safe_json_serialize(obj):
+            """Safely serialize objects to JSON-compatible format"""
+            try:
+                if obj is None:
+                    return "None"
+                elif isinstance(obj, (str, int, float, bool)):
+                    return obj
+                elif isinstance(obj, dict):
+                    return {k: safe_json_serialize(v) for k, v in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [safe_json_serialize(item) for item in obj]
+                elif hasattr(obj, 'item'):  # numpy scalar
+                    return obj.item()
+                elif hasattr(obj, 'to_dict'):  # pandas objects
+                    return str(obj)
+                else:
+                    return str(obj)
+            except Exception:
+                return str(obj)
+        
+        try:
+            analysis_results_str = json.dumps(safe_json_serialize(analysis_results), indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to serialize analysis results: {e}")
+            analysis_results_str = str(analysis_results)
+        
         presentation_messages = [
             {"role": "system", "content": PRESENTATION_PROMPT},
             {
                 "role": "user",
-                "content": f"Questions:\n{questions}\n\nAnalysis results:\n{json.dumps(analysis_results, default=str)}\n\nAvailable data:\n" +
+                "content": f"Questions:\n{questions}\n\nAnalysis results:\n{analysis_results_str}\n\nAvailable data:\n" +
                           "\n".join(data_info_detailed) +
                           f"\n\n{keys_info}\n\nIMPORTANT: \n- Use data_context[key] to access data where 'key' is one of the available keys listed above - NEVER read from files!\n- Store your final result in the 'result' variable as a Python dictionary\n- Do NOT call json.dumps() - just create the dictionary\n- Convert numpy types to Python types (use int() and float())\n\nWrite Python code to create visualizations and format the final result dictionary."
             }

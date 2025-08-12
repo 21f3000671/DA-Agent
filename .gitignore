@@ -112,3 +112,6 @@ dmypy.json
 .vercel/
 .now/
 .output/
+
+project-data-analyst
+.claude
