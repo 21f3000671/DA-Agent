@@ -2,9 +2,23 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from typing import List
 import logging
 import io
+import json
 
-# Import the agent orchestrator from the agent module
-from agent.main import run_agent
+# Try to import the agent, but provide fallback if it fails
+try:
+    from agent.main import run_agent
+    AGENT_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Agent import failed: {e}. Running in minimal mode.")
+    AGENT_AVAILABLE = False
+    
+    async def run_agent(questions, files):
+        return {
+            "error": "Agent functionality not available in minimal deployment",
+            "questions_received": questions,
+            "files_count": len(files) if files else 0,
+            "message": "This is a minimal deployment. Heavy dependencies are disabled to fit Vercel's 250MB limit."
+        }
 
 # Configure logging for the application
 logging.basicConfig(level=logging.INFO)
@@ -66,18 +80,9 @@ async def health():
     """
     Health check endpoint for debugging Vercel deployment issues.
     """
-    try:
-        # Test basic imports
-        from agent.main import LLM_PROVIDER, LLM_MODEL
-        return {
-            "status": "healthy",
-            "provider": LLM_PROVIDER,
-            "model": LLM_MODEL,
-            "message": "All systems operational"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e),
-            "message": "Health check failed"
-        }
+    return {
+        "status": "healthy",
+        "agent_available": AGENT_AVAILABLE,
+        "deployment_mode": "minimal" if not AGENT_AVAILABLE else "full",
+        "message": "API is operational"
+    }
