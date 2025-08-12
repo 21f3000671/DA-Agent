@@ -60,3 +60,24 @@ async def home():
     A simple GET endpoint to confirm that the service is up and running.
     """
     return {"message": "Data Analyst Agent is running. Use the /api/ endpoint to post tasks."}
+
+@app.get("/health")
+async def health():
+    """
+    Health check endpoint for debugging Vercel deployment issues.
+    """
+    try:
+        # Test basic imports
+        from agent.main import LLM_PROVIDER, LLM_MODEL
+        return {
+            "status": "healthy",
+            "provider": LLM_PROVIDER,
+            "model": LLM_MODEL,
+            "message": "All systems operational"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": "Health check failed"
+        }
