@@ -1,0 +1,26 @@
+# Development and testing files
+test_*.py
+run_live_test.py
+main.py
+project-data-analyst/
+
+# UV and lock files
+uv.lock
+.uv/
+
+# Git and IDE files
+.git/
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Documentation
+README.md
+LICENSE
+CLAUDE.md
+
+# Backup files
+vercel-bak.json

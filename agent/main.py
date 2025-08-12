@@ -198,36 +198,53 @@ def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, An
     """
     # Create a safe execution environment with necessary imports
     try:
-        import numpy as np
         import requests
         import base64
-        import matplotlib
-        import matplotlib.pyplot as plt
-        import seaborn as sns
         from bs4 import BeautifulSoup
-        import duckdb
-        from sklearn.linear_model import LinearRegression
-        import networkx as nx
+        
+        # Optional heavy dependencies - fail gracefully if not available
+        try:
+            import numpy as np
+        except ImportError:
+            np = None
+            
+        try:
+            import matplotlib
+            import matplotlib.pyplot as plt
+            matplotlib.use('Agg')  # Set to non-interactive backend
+        except ImportError:
+            matplotlib = None
+            plt = None
+            
+        try:
+            import seaborn as sns
+        except ImportError:
+            sns = None
+            
+        try:
+            import duckdb
+        except ImportError:
+            duckdb = None
+            
+        try:
+            from sklearn.linear_model import LinearRegression
+        except ImportError:
+            LinearRegression = None
+            
+        try:
+            import networkx as nx
+        except ImportError:
+            nx = None
         
         exec_globals = {
             '__builtins__': __builtins__,
             'pd': pd,
             'pandas': pd,
-            'np': np,
-            'numpy': np,
             'requests': requests,
             'json': json,
             'io': io,
             'base64': base64,
-            'matplotlib': matplotlib,
-            'plt': plt,
-            'seaborn': sns,
-            'sns': sns,
             'BeautifulSoup': BeautifulSoup,
-            'duckdb': duckdb,
-            'LinearRegression': LinearRegression,
-            'nx': nx,
-            'networkx': nx,
             're': re,
             'data_context': data_context,
             'result': None,
@@ -240,8 +257,19 @@ def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, An
             'parse_html_table_to_dataframe': parse_html_table_to_dataframe
         }
         
-        # Set matplotlib to non-interactive backend
-        matplotlib.use('Agg')
+        # Add optional dependencies only if available
+        if np is not None:
+            exec_globals.update({'np': np, 'numpy': np})
+        if matplotlib is not None and plt is not None:
+            exec_globals.update({'matplotlib': matplotlib, 'plt': plt})
+        if sns is not None:
+            exec_globals.update({'seaborn': sns, 'sns': sns})
+        if duckdb is not None:
+            exec_globals['duckdb'] = duckdb
+        if LinearRegression is not None:
+            exec_globals['LinearRegression'] = LinearRegression
+        if nx is not None:
+            exec_globals.update({'nx': nx, 'networkx': nx})
         
         # Execute the code
         exec(code, exec_globals)
