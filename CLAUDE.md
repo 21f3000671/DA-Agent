@@ -50,6 +50,13 @@ The application is configured for Vercel deployment via `vercel.json` with the A
 - `data_analyzer.py`: Statistical analysis (correlation, linear regression)
 - `plotter.py`: Matplotlib/Seaborn visualization with base64 encoding
 
+**Data Source Capabilities**:
+- **S3 Integration**: Download CSV, JSON, Parquet, Excel files from S3 buckets
+- **Web Scraping**: Extract tables from HTML pages automatically
+- **DuckDB Queries**: Execute complex SQL operations on DataFrames and remote files
+- **File Processing**: Support for CSV, JSON, Parquet, Excel, and text files
+- **URL Detection**: Automatic detection of HTTP/HTTPS and S3 URLs
+
 **Advanced Analysis Capabilities**:
 - Multi-stage analysis pipeline: data gathering → analysis → presentation
 - Dynamic code generation for custom data transformations
@@ -95,6 +102,13 @@ Each tool follows a consistent pattern:
 - `LLM_MODEL`: Model name to use (default: "gpt-4o")  
 - `LLM_BASE_URL`: Custom endpoint URL (optional, for self-hosted or alternative providers)
 - `LLM_API_KEY`: API key for the LLM provider (falls back to OPENAI_API_KEY if not set)
+
+**S3/AWS Configuration (Optional):**
+- `AWS_ACCESS_KEY_ID`: AWS access key for authenticated S3 access
+- `AWS_SECRET_ACCESS_KEY`: AWS secret key for authenticated S3 access
+- `AWS_DEFAULT_REGION`: AWS region for S3 operations (e.g., 'us-east-1')
+- Note: The agent will attempt anonymous access if no credentials are provided
+- Supports IAM role-based authentication when running on AWS infrastructure
 
 ### File Structure
 ```
