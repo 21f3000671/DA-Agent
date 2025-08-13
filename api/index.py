@@ -59,4 +59,4 @@ async def home():
     """
     A simple GET endpoint to confirm that the service is up and running.
     """
-    return {"message": "Data Analyst Agent is running. Use the /api/ endpoint to post tasks."}
+    return {"message": "Welcome to the test site."}
