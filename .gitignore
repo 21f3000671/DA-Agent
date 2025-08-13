@@ -116,3 +116,7 @@ dmypy.json
 project-data-analyst
 .claude
 .vercel
+
+# Logs
+logs/
+*.log

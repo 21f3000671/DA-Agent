@@ -50,6 +50,12 @@ The application is configured for Vercel deployment via `vercel.json` with the A
 - `data_analyzer.py`: Statistical analysis (correlation, linear regression)
 - `plotter.py`: Matplotlib/Seaborn visualization with base64 encoding
 
+**Advanced Analysis Capabilities**:
+- Multi-stage analysis pipeline: data gathering → analysis → presentation
+- Dynamic code generation for custom data transformations
+- Automatic syntax validation and indentation fixing for generated code
+- Support for complex analytical workflows via Python code execution
+
 ### Data Flow
 
 1. **Input Processing**: Files uploaded to `/api/` endpoint
@@ -106,3 +112,13 @@ vercel.json      # Vercel deployment configuration
 - DataFrame operations automatically handle data type coercion and missing values
 - Base64 image encoding is used for plot visualization in JSON responses
 - DuckDB queries can reference any DataFrame in the `data_context` as virtual tables
+
+### Error Handling and Fallbacks
+
+- **Code Validation**: Generated Python code is syntax-checked before execution
+- **Automatic Indentation Fixing**: Common indentation issues are automatically corrected
+- **Graceful Degradation**: Multiple fallback levels ensure meaningful responses:
+  1. If presentation fails → returns raw analysis results
+  2. If analysis fails → returns data summary with column info
+  3. If data loading fails → provides error diagnostics
+- **Result Preservation**: Intermediate results are preserved across pipeline stages

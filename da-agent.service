@@ -11,8 +11,8 @@ Environment="PYTHONPATH=/root/DA-Agent"
 ExecStart=/root/.local/bin/uv run uvicorn api.index:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 300 --timeout-graceful-shutdown 300
 Restart=always
 RestartSec=10
-StandardOutput=syslog
-StandardError=syslog
+StandardOutput=append:/root/DA-Agent/logs/da-agent.log
+StandardError=append:/root/DA-Agent/logs/da-agent-error.log
 SyslogIdentifier=da-agent
 
 [Install]

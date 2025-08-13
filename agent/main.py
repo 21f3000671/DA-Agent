@@ -191,6 +191,69 @@ def parse_html_table_to_dataframe(table) -> pd.DataFrame:
         logger.error(f"Failed to parse HTML table: {e}")
         return pd.DataFrame()
 
+def safe_numeric_convert(df, columns):
+    """
+    Safely convert specified columns to numeric, handling errors gracefully.
+    
+    Args:
+        df: DataFrame to modify
+        columns: List of column names or single column name to convert
+        
+    Returns:
+        DataFrame with converted columns
+    """
+    if isinstance(columns, str):
+        columns = [columns]
+    
+    df_copy = df.copy()
+    for col in columns:
+        if col in df_copy.columns:
+            df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
+    return df_copy
+
+def fix_type_conversion_errors(code: str) -> str:
+    """
+    Automatically fix common type conversion errors in generated code.
+    
+    Args:
+        code: Python code that failed with type conversion errors
+        
+    Returns:
+        Fixed code with safe type conversions
+    """
+    import re
+    
+    fixed_code = code
+    
+    # Pattern 1: Replace .astype(float) with pd.to_numeric(..., errors='coerce')
+    pattern1 = r"\.astype\(float\)"
+    replacement1 = ""
+    matches1 = re.finditer(pattern1, fixed_code)
+    
+    for match in reversed(list(matches1)):  # Reverse to maintain positions
+        start, end = match.span()
+        # Find the start of the expression (usually after = or [)
+        expr_start = fixed_code.rfind('=', 0, start) + 1
+        if expr_start == 0:
+            expr_start = fixed_code.rfind('[', 0, start) + 1
+        
+        # Extract the column expression
+        expr = fixed_code[expr_start:start].strip()
+        replacement = f" pd.to_numeric({expr}, errors='coerce')"
+        fixed_code = fixed_code[:expr_start] + replacement + fixed_code[end:]
+    
+    # Pattern 2: Replace .str.replace().astype(float) patterns
+    pattern2 = r"(\w+\[.*?\]\.str\.replace\([^)]+\))\.astype\(float\)"
+    replacement2 = r"pd.to_numeric(\1, errors='coerce')"
+    fixed_code = re.sub(pattern2, replacement2, fixed_code)
+    
+    # Pattern 3: Replace pd.to_numeric without errors parameter
+    pattern3 = r"pd\.to_numeric\(([^,)]+)\)"
+    replacement3 = r"pd.to_numeric(\1, errors='coerce')"
+    fixed_code = re.sub(pattern3, replacement3, fixed_code)
+    
+    return fixed_code
+
 def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
     """
     Executes Python code in a controlled environment with access to data context.
@@ -254,7 +317,9 @@ def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, An
             'detect_urls': detect_urls,
             'scrape_web_data': scrape_web_data,
             'clean_scraped_dataframe': clean_scraped_dataframe,
-            'parse_html_table_to_dataframe': parse_html_table_to_dataframe
+            'parse_html_table_to_dataframe': parse_html_table_to_dataframe,
+            # Helper function for safe type conversion
+            'safe_numeric_convert': safe_numeric_convert
         }
         
         # Add optional dependencies only if available
@@ -271,8 +336,18 @@ def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, An
         if nx is not None:
             exec_globals.update({'nx': nx, 'networkx': nx})
         
-        # Execute the code
-        exec(code, exec_globals)
+        # Execute the code with automatic error fixing
+        try:
+            exec(code, exec_globals)
+        except ValueError as e:
+            if "could not convert string to float" in str(e):
+                logger.warning(f"Type conversion error detected: {e}")
+                # Try to fix common type conversion issues
+                fixed_code = fix_type_conversion_errors(code)
+                logger.info("Attempting to run code with automatic type fixes...")
+                exec(fixed_code, exec_globals)
+            else:
+                raise
         
         # Convert numpy types to Python types for JSON serialization
         def convert_numpy_types(obj):
@@ -508,6 +583,13 @@ Write Python code to gather the required data. End your response with the code b
 DATA_ANALYSIS_PROMPT = """
 You are a Data Analysis Specialist. Your task is to write Python code to perform statistical analysis and calculations on the available data.
 
+CRITICAL DATA TYPE SAFETY RULES:
+1. **ALWAYS check column data types before numerical operations**
+2. **Use pd.to_numeric(column, errors='coerce') to safely convert strings to numbers**
+3. **Check for NaN values after conversion and handle them appropriately**
+4. **Never assume a column contains numeric data - always verify first**
+5. **Use try-except blocks for operations that might fail due to data types**
+
 Available imports and libraries:
 - pandas as pd
 - numpy as np
@@ -524,10 +606,12 @@ Your capabilities:
 
 Code Templates:
 
-# Correlation example (handling missing values):
+# Correlation example (handling missing values and type conversion):
 # df = data_context['filename.csv']  # Use actual filename from data_context keys
-# df['col1'] = pd.to_numeric(df['col1'], errors='coerce')
-# df['col2'] = pd.to_numeric(df['col2'], errors='coerce')
+# # Safe type conversion - ALWAYS do this before numerical operations
+# df = safe_numeric_convert(df, ['col1', 'col2'])
+# # Or manually: df['col1'] = pd.to_numeric(df['col1'], errors='coerce')
+# #              df['col2'] = pd.to_numeric(df['col2'], errors='coerce')
 # # Drop rows where either column has missing values
 # df_clean = df[['col1', 'col2']].dropna()
 # if len(df_clean) > 1:
@@ -539,9 +623,10 @@ Code Templates:
 # Linear regression with safe data access:
 # from sklearn.linear_model import LinearRegression
 # df = data_context['scraped_table_1']  # Use actual table name
-# # Ensure both columns are numeric and clean missing values
-# df['x_column'] = pd.to_numeric(df['x_column'], errors='coerce') 
-# df['y_column'] = pd.to_numeric(df['y_column'], errors='coerce')
+# # CRITICAL: Ensure both columns are numeric before any calculations
+# df = safe_numeric_convert(df, ['x_column', 'y_column'])
+# # Alternative: df['x_column'] = pd.to_numeric(df['x_column'], errors='coerce') 
+# #              df['y_column'] = pd.to_numeric(df['y_column'], errors='coerce')
 # # Drop rows where either column has missing values
 # df_clean = df[['x_column', 'y_column']].dropna()
 # if len(df_clean) > 1:
@@ -658,6 +743,12 @@ async def run_agent(questions: str, files: List[UploadFile]) -> Any:
         return {"error": error_msg}
 
     logger.info("Starting three-stage data agent...")
+    
+    # Import datetime and setup debug directory at the start
+    import os
+    from datetime import datetime
+    debug_dir = "logs/llm_debug"
+    os.makedirs(debug_dir, exist_ok=True)
 
     # This dictionary will hold our data context
     data_context: Dict[str, Any] = {}
@@ -741,16 +832,83 @@ INSTRUCTIONS:
             
             response = client.chat.completions.create(
                 model=LLM_MODEL,
-                messages=gathering_messages
+                messages=gathering_messages,
+                max_tokens=4096,  # Increase token limit for complete code generation
+                temperature=0.2   # Lower temperature for more consistent code output
             )
             
-            gathering_code = extract_code_from_response(response.choices[0].message.content)
+            raw_response = response.choices[0].message.content
+            logger.info(f"Raw LLM response for data gathering:\n{raw_response}")
+            
+            # Write raw response to debug file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            debug_file = f"{debug_dir}/gathering_{timestamp}.txt"
+            with open(debug_file, 'w') as f:
+                f.write("=== RAW LLM RESPONSE FOR DATA GATHERING ===\n")
+                f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                f.write(f"Question: {questions}\n")
+                f.write("="*50 + "\n")
+                f.write(raw_response)
+                f.write("\n" + "="*50 + "\n")
+            logger.info(f"Raw response saved to {debug_file}")
+            
+            gathering_code = extract_code_from_response(raw_response)
+            logger.info(f"Extracted code (length: {len(gathering_code)}):\n{gathering_code}")
+            
             if gathering_code:
                 logger.info("Executing data gathering code...")
-                logger.info(f"Generated code:\n{gathering_code}")
                 # Create a copy of data_context and add questions for helper functions
                 gathering_context = data_context.copy()
                 gathering_context['questions'] = questions
+                
+                # Try to validate the code syntax before execution
+                try:
+                    compile(gathering_code, '<string>', 'exec')
+                    logger.info("Code syntax validation passed")
+                except SyntaxError as e:
+                    logger.error(f"Syntax error in extracted code: {e}")
+                    logger.error(f"Problematic code:\n{gathering_code}")
+                    
+                    # Try multiple fixes for common indentation issues
+                    import textwrap
+                    fixed_code = None
+                    
+                    # Fix 1: Simple dedent
+                    try:
+                        test_code = textwrap.dedent(gathering_code)
+                        compile(test_code, '<string>', 'exec')
+                        fixed_code = test_code
+                        logger.info("Fixed with simple dedent")
+                    except SyntaxError:
+                        pass
+                    
+                    # Fix 2: Remove leading spaces from all lines
+                    if not fixed_code:
+                        try:
+                            lines = gathering_code.split('\n')
+                            # Find minimum indentation (excluding empty lines)
+                            min_indent = float('inf')
+                            for line in lines:
+                                if line.strip():
+                                    indent = len(line) - len(line.lstrip())
+                                    min_indent = min(min_indent, indent)
+                            
+                            if min_indent > 0 and min_indent != float('inf'):
+                                test_code = '\n'.join(line[min_indent:] if line.strip() else line 
+                                                     for line in lines)
+                                compile(test_code, '<string>', 'exec')
+                                fixed_code = test_code
+                                logger.info("Fixed by removing minimum indentation")
+                        except (SyntaxError, ValueError):
+                            pass
+                    
+                    if fixed_code:
+                        gathering_code = fixed_code
+                        logger.info("Indentation fixed successfully")
+                    else:
+                        logger.error(f"Could not fix syntax error: {e}")
+                        return {"error": f"Data gathering stage failed: {e}"}
+                
                 exec_result = execute_python_code(gathering_code, gathering_context)
                 if exec_result['success']:
                     data_context = exec_result['data_context']
@@ -790,10 +948,26 @@ INSTRUCTIONS:
         
         response = client.chat.completions.create(
             model=LLM_MODEL,
-            messages=analysis_messages
+            messages=analysis_messages,
+            max_tokens=4096,  # Increase token limit for complete code generation
+            temperature=0.2   # Lower temperature for more consistent code output
         )
         
-        analysis_code = extract_code_from_response(response.choices[0].message.content)
+        raw_analysis_response = response.choices[0].message.content
+        
+        # Write raw analysis response to debug file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_file = f"{debug_dir}/analysis_{timestamp}.txt"
+        with open(debug_file, 'w') as f:
+            f.write("=== RAW LLM RESPONSE FOR ANALYSIS ===\n")
+            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+            f.write(f"Question: {questions}\n")
+            f.write("="*50 + "\n")
+            f.write(raw_analysis_response)
+            f.write("\n" + "="*50 + "\n")
+        logger.info(f"Raw analysis response saved to {debug_file}")
+        
+        analysis_code = extract_code_from_response(raw_analysis_response)
         analysis_results = {}
         if analysis_code:
             logger.info("Executing data analysis code...")
@@ -862,10 +1036,26 @@ INSTRUCTIONS:
         
         response = client.chat.completions.create(
             model=LLM_MODEL,
-            messages=presentation_messages
+            messages=presentation_messages,
+            max_tokens=4096,  # Increase token limit for complete code generation
+            temperature=0.2   # Lower temperature for more consistent code output
         )
         
-        presentation_code = extract_code_from_response(response.choices[0].message.content)
+        raw_presentation_response = response.choices[0].message.content
+        
+        # Write raw presentation response to debug file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_file = f"{debug_dir}/presentation_{timestamp}.txt"
+        with open(debug_file, 'w') as f:
+            f.write("=== RAW LLM RESPONSE FOR PRESENTATION ===\n")
+            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+            f.write(f"Question: {questions}\n")
+            f.write("="*50 + "\n")
+            f.write(raw_presentation_response)
+            f.write("\n" + "="*50 + "\n")
+        logger.info(f"Raw presentation response saved to {debug_file}")
+        
+        presentation_code = extract_code_from_response(raw_presentation_response)
         if presentation_code:
             logger.info("Executing presentation code...")
             exec_result = execute_python_code(presentation_code, data_context)
@@ -936,23 +1126,80 @@ def extract_code_from_response(content: str) -> str:
     Extract Python code from LLM response.
     """
     import re
+    import textwrap
     
     # Look for code blocks
     code_match = re.search(r'```(?:python)?\s*(.*?)\s*```', content, re.DOTALL)
     if code_match:
-        return code_match.group(1).strip()
+        code = code_match.group(1).strip()
+        # Fix common indentation issues
+        if code and not code.startswith(' ') and '\n' in code:
+            # If first line has no indent but subsequent lines do, dedent the whole block
+            lines = code.split('\n')
+            if len(lines) > 1 and lines[1].startswith(' '):
+                code = textwrap.dedent(code)
+        return code
     
-    # If no code blocks, look for code after certain patterns
+    # If no code blocks, assume the entire content might be code
+    # First, check if it looks like Python code
     lines = content.split('\n')
+    
+    # Check if the content looks like code (has Python keywords, assignments, etc.)
+    code_indicators = ['import ', 'def ', '=', 'if ', 'for ', 'while ', 'try:', 'except:', 
+                      'data_context', 'result', 'detected_urls', 'scrape_result']
+    
+    # Count how many lines look like code
+    code_like_lines = 0
+    for line in lines:
+        if any(indicator in line for indicator in code_indicators):
+            code_like_lines += 1
+    
+    # If most lines look like code, treat the whole thing as code
+    if code_like_lines >= len([l for l in lines if l.strip()]) * 0.5:
+        code = content.strip()
+        # Fix indentation issues
+        if code and '\n' in code:
+            first_line = code.split('\n')[0]
+            # If first line has no indent but subsequent lines do, we need to handle it
+            if not first_line.startswith(' '):
+                lines = code.split('\n')
+                # Check if this is a continuation that needs fixing
+                if len(lines) > 1 and lines[1].strip() and not lines[1].startswith(' '):
+                    # Lines are properly aligned, return as-is
+                    return code
+                elif len(lines) > 1 and lines[1].startswith(' '):
+                    # We have indentation mismatch - need to align properly
+                    # This is likely a fragment starting mid-block
+                    return code
+        return code
+    
+    # Otherwise, try to extract code portions
     code_started = False
     code_lines = []
     
     for line in lines:
         # Start collecting code after certain indicators
-        if any(indicator in line.lower() for indicator in ['import ', 'def ', 'data_context', 'result =']):
+        if any(indicator in line.lower() for indicator in ['import ', 'def ', 'data_context', 'result =', 'url =', 'detected_urls']):
             code_started = True
         
         if code_started:
+            # Stop if we hit a non-code line (e.g., explanatory text)
+            if line.strip() and not line.startswith(' ') and not any(
+                indicator in line.lower() for indicator in 
+                ['=', 'import ', 'def ', 'if ', 'else:', 'elif ', 'for ', 'while ', 'try:', 'except:', '#', 'return', 'pass', 'break', 'continue']
+            ):
+                # Check if this looks like prose rather than code
+                if len(line.split()) > 10 and '.' in line and not '"' in line and not "'" in line:
+                    break
             code_lines.append(line)
     
-    return '\n'.join(code_lines).strip() if code_lines else ""
+    if code_lines:
+        code = '\n'.join(code_lines).strip()
+        # Fix indentation issues for extracted code
+        if code and not code.startswith(' ') and '\n' in code:
+            lines = code.split('\n')
+            if len(lines) > 1 and lines[1].startswith(' '):
+                code = textwrap.dedent(code)
+        return code
+    
+    return ""
