@@ -24,14 +24,33 @@ logger = logging.getLogger(__name__)
 def detect_urls(text: str) -> List[str]:
     """
     Detect URLs in the given text using regex patterns.
-    Returns a list of detected URLs.
+    Returns a list of detected URLs including S3 URLs.
     """
-    url_pattern = re.compile(
+    # Pattern for HTTP/HTTPS URLs
+    http_pattern = re.compile(
         r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     )
-    urls = url_pattern.findall(text)
-    logger.info(f"Detected URLs: {urls}")
-    return urls
+    
+    # Pattern for S3 URLs (s3://bucket/key) - improved to handle more characters but stop at line breaks
+    s3_pattern = re.compile(
+        r's3://[a-zA-Z0-9\-\.]+/[a-zA-Z0-9\-\./\?=&_%+]+(?=\s|$)'
+    )
+    
+    http_urls = http_pattern.findall(text)
+    s3_urls = s3_pattern.findall(text)
+    
+    all_urls = http_urls + s3_urls
+    logger.info(f"Detected URLs: {all_urls} (HTTP: {len(http_urls)}, S3: {len(s3_urls)})")
+    return all_urls
+
+def is_valid_url(url: str) -> bool:
+    """Check if URL is valid and accessible."""
+    try:
+        from urllib.parse import urlparse
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except Exception:
+        return False
 
 def scrape_web_data(url: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -39,6 +58,16 @@ def scrape_web_data(url: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
     Attempts to scrape tables from the given URL and stores them in data_context.
     """
     try:
+        # Basic URL validation
+        if not is_valid_url(url):
+            logger.info(f"Invalid URL format: {url}")
+            return {
+                'success': False,
+                'data_context': data_context,
+                'scraped_tables': [],
+                'error': f"Invalid URL format: {url}"
+            }
+        
         logger.info(f"Attempting to scrape data from: {url}")
         
         # Try multiple methods to get tables
@@ -59,12 +88,24 @@ def scrape_web_data(url: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
                 })
                 logger.info(f"Scraped table {i+1} with shape {table.shape}")
         except Exception as e:
-            logger.warning(f"pandas.read_html failed: {e}")
+            # Handle different types of errors with appropriate log levels
+            error_msg = str(e).lower()
+            if '404' in error_msg or 'not found' in error_msg:
+                logger.info(f"URL not accessible (404): {url}")
+            elif '403' in error_msg or 'forbidden' in error_msg:
+                logger.info(f"URL access forbidden (403): {url}")
+            elif 'timeout' in error_msg or 'timed out' in error_msg:
+                logger.info(f"URL request timeout: {url}")
+            elif 'no tables found' in error_msg:
+                logger.info(f"No HTML tables found at: {url}")
+            else:
+                logger.warning(f"pandas.read_html failed for {url}: {e}")
         
         # Method 2: BeautifulSoup for more complex scraping if pandas failed
         if not scraped_data:
             try:
-                response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+                response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+                response.raise_for_status()  # Raise exception for HTTP errors
                 soup = BeautifulSoup(response.content, 'html.parser')
                 tables = soup.find_all('table')
                 
@@ -80,8 +121,19 @@ def scrape_web_data(url: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
                             'columns': list(df.columns)
                         })
                         logger.info(f"Scraped table {i+1} with BeautifulSoup, shape {df.shape}")
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 404:
+                    logger.info(f"URL not found (404): {url}")
+                elif e.response.status_code == 403:
+                    logger.info(f"URL access forbidden (403): {url}")
+                else:
+                    logger.warning(f"HTTP error {e.response.status_code}: {url}")
+            except requests.exceptions.Timeout:
+                logger.info(f"URL request timeout: {url}")
+            except requests.exceptions.ConnectionError:
+                logger.info(f"Connection error for URL: {url}")
             except Exception as e:
-                logger.warning(f"BeautifulSoup scraping failed: {e}")
+                logger.warning(f"BeautifulSoup scraping failed for {url}: {e}")
         
         if scraped_data:
             return {
@@ -91,11 +143,12 @@ def scrape_web_data(url: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
                 'error': None
             }
         else:
+            logger.info(f"No tables found at URL: {url}")
             return {
                 'success': False,
                 'data_context': data_context,
                 'scraped_tables': [],
-                'error': f"No tables found at {url}"
+                'error': f"No tables found at {url}. The page may not contain HTML tables or may be inaccessible."
             }
             
     except Exception as e:
@@ -211,6 +264,207 @@ def safe_numeric_convert(df, columns):
             df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
     return df_copy
 
+def safe_plot_to_base64():
+    """
+    Safely convert current matplotlib plot to base64 string using PNG format.
+    
+    Returns:
+        str: Base64 encoded PNG image as data URI
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import base64
+        from io import BytesIO
+        
+        # Create buffer and save plot
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=80, bbox_inches='tight')
+        buffer.seek(0)
+        
+        # Encode to base64
+        plot_data = base64.b64encode(buffer.read()).decode()
+        buffer.close()
+        plt.close()
+        
+        # Return as data URI
+        return f"data:image/png;base64,{plot_data}"
+    
+    except Exception as e:
+        logger.error(f"Error creating plot: {e}")
+        return f"Error creating visualization: {str(e)}"
+
+def is_s3_url(url: str) -> bool:
+    """Check if a URL is an S3 URL."""
+    return url.startswith('s3://') or 's3.amazonaws.com' in url or '.s3.' in url
+
+def download_from_s3(url: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Download data from S3 and load into data_context.
+    Supports s3:// URLs and HTTPS S3 URLs.
+    """
+    try:
+        import boto3
+        from botocore.exceptions import NoCredentialsError, ClientError
+        import tempfile
+        import os
+        from urllib.parse import urlparse
+        
+        logger.info(f"Downloading from S3: {url}")
+        
+        # Parse S3 URL
+        if url.startswith('s3://'):
+            # s3://bucket/key format
+            parsed = urlparse(url)
+            bucket_name = parsed.netloc
+            key = parsed.path.lstrip('/')
+        elif 's3.amazonaws.com' in url or '.s3.' in url:
+            # HTTPS S3 URL format
+            parsed = urlparse(url)
+            if 's3.amazonaws.com' in parsed.netloc:
+                # https://bucket.s3.amazonaws.com/key
+                bucket_name = parsed.netloc.split('.s3.amazonaws.com')[0]
+                key = parsed.path.lstrip('/')
+            else:
+                # https://s3.region.amazonaws.com/bucket/key
+                path_parts = parsed.path.lstrip('/').split('/', 1)
+                bucket_name = path_parts[0]
+                key = path_parts[1] if len(path_parts) > 1 else ''
+        else:
+            return {"success": False, "error": f"Unsupported S3 URL format: {url}"}
+        
+        # Create S3 client (will use default credentials or IAM role)
+        try:
+            s3_client = boto3.client('s3')
+            # Test access with a head_object call
+            s3_client.head_object(Bucket=bucket_name, Key=key)
+        except NoCredentialsError:
+            logger.warning("No AWS credentials found, attempting anonymous access")
+            s3_client = boto3.client('s3', 
+                                   config=boto3.session.Config(signature_version='UNSIGNED'))
+        except ClientError as e:
+            if e.response['Error']['Code'] == '403':
+                logger.warning("Access denied, attempting anonymous access")
+                s3_client = boto3.client('s3', 
+                                       config=boto3.session.Config(signature_version='UNSIGNED'))
+            else:
+                return {"success": False, "error": f"S3 access error: {str(e)}"}
+        
+        # Determine file type from key
+        file_extension = key.split('.')[-1].lower() if '.' in key else ''
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}') as tmp_file:
+            tmp_file_path = tmp_file.name
+            try:
+                # Download file
+                s3_client.download_fileobj(bucket_name, key, tmp_file)
+                
+                logger.info(f"Downloaded {key} from bucket {bucket_name} to {tmp_file_path}")
+                
+                # Load data based on file type
+                filename = os.path.basename(key)
+                dataframe_key = f"s3_{filename}"
+                
+                if file_extension in ['csv']:
+                    df = pd.read_csv(tmp_file_path)
+                    data_context[dataframe_key] = df
+                    logger.info(f"Loaded CSV with shape {df.shape} as '{dataframe_key}'")
+                elif file_extension in ['json']:
+                    df = pd.read_json(tmp_file_path)
+                    data_context[dataframe_key] = df
+                    logger.info(f"Loaded JSON with shape {df.shape} as '{dataframe_key}'")
+                elif file_extension in ['parquet']:
+                    df = pd.read_parquet(tmp_file_path)
+                    data_context[dataframe_key] = df
+                    logger.info(f"Loaded Parquet with shape {df.shape} as '{dataframe_key}'")
+                elif file_extension in ['xlsx', 'xls']:
+                    df = pd.read_excel(tmp_file_path)
+                    data_context[dataframe_key] = df
+                    logger.info(f"Loaded Excel with shape {df.shape} as '{dataframe_key}'")
+                else:
+                    # Try to load as text
+                    with open(tmp_file_path, 'r') as f:
+                        content = f.read()
+                        data_context[f"s3_{filename}_content"] = content
+                        logger.info(f"Loaded text file content as 's3_{filename}_content'")
+                
+                return {
+                    "success": True, 
+                    "data_context": data_context,
+                    "message": f"Successfully downloaded and loaded {filename} from S3",
+                    "filename": filename,
+                    "key": dataframe_key
+                }
+                
+            finally:
+                # Clean up temporary file
+                if os.path.exists(tmp_file_path):
+                    os.unlink(tmp_file_path)
+                    
+    except ImportError:
+        return {"success": False, "error": "boto3 not available for S3 operations"}
+    except Exception as e:
+        logger.error(f"S3 download failed: {str(e)}")
+        return {"success": False, "error": f"S3 download failed: {str(e)}"}
+
+def execute_duckdb_query(query: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Execute a DuckDB query with access to data_context DataFrames.
+    """
+    try:
+        import duckdb
+        
+        logger.info(f"Executing DuckDB query: {query}")
+        
+        # Create DuckDB connection
+        conn = duckdb.connect()
+        
+        # Register all DataFrames as virtual tables
+        registered_tables = []
+        for key, value in data_context.items():
+            if isinstance(value, pd.DataFrame):
+                # Clean table name (remove special characters)
+                table_name = re.sub(r'[^a-zA-Z0-9_]', '_', key)
+                conn.register(table_name, value)
+                registered_tables.append((key, table_name))
+                logger.info(f"Registered DataFrame '{key}' as table '{table_name}'")
+        
+        # Execute query
+        result_df = conn.execute(query).fetchdf()
+        
+        # Store result in data_context
+        result_key = "duckdb_query_result"
+        counter = 1
+        while result_key in data_context:
+            result_key = f"duckdb_query_result_{counter}"
+            counter += 1
+            
+        data_context[result_key] = result_df
+        
+        return {
+            "success": True,
+            "data_context": data_context,
+            "result_key": result_key,
+            "result_shape": result_df.shape,
+            "registered_tables": registered_tables,
+            "message": f"Query executed successfully, result stored as '{result_key}'"
+        }
+        
+    except ImportError:
+        return {"success": False, "error": "DuckDB not available"}
+    except Exception as e:
+        logger.error(f"DuckDB query failed: {str(e)}")
+        return {"success": False, "error": f"DuckDB query failed: {str(e)}"}
+
+def download_data_from_url(url: str, data_context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Universal data download function that handles both S3 and HTTP URLs.
+    """
+    if is_s3_url(url):
+        return download_from_s3(url, data_context)
+    else:
+        return scrape_web_data(url, data_context)
+
 def fix_type_conversion_errors(code: str) -> str:
     """
     Automatically fix common type conversion errors in generated code.
@@ -315,11 +569,20 @@ def execute_python_code(code: str, data_context: Dict[str, Any]) -> Dict[str, An
             'questions': data_context.get('questions', ''),
             # Helper functions for web scraping
             'detect_urls': detect_urls,
+            'is_valid_url': is_valid_url,
             'scrape_web_data': scrape_web_data,
             'clean_scraped_dataframe': clean_scraped_dataframe,
             'parse_html_table_to_dataframe': parse_html_table_to_dataframe,
             # Helper function for safe type conversion
-            'safe_numeric_convert': safe_numeric_convert
+            'safe_numeric_convert': safe_numeric_convert,
+            # Helper function for safe plotting
+            'safe_plot_to_base64': safe_plot_to_base64,
+            # S3 and data download functions
+            'is_s3_url': is_s3_url,
+            'download_from_s3': download_from_s3,
+            'download_data_from_url': download_data_from_url,
+            # DuckDB functions
+            'execute_duckdb_query': execute_duckdb_query
         }
         
         # Add optional dependencies only if available
@@ -513,20 +776,28 @@ Available imports and libraries:
 - requests
 - BeautifulSoup from bs4
 - duckdb
+- boto3 (for S3 access)
 - json
 - io
 - re (for URL detection)
 
 Available helper functions:
-- detect_urls(text): Detects URLs in text and returns a list
-- scrape_web_data(url, data_context): Scrapes tables from a URL and adds them to data_context
+- detect_urls(text): Detects URLs in text and returns a list (supports HTTP, HTTPS, and S3 URLs)
+- is_valid_url(url): Check if URL format is valid before attempting to access
+- scrape_web_data(url, data_context): Scrapes tables from HTTP/HTTPS URLs and adds them to data_context
+- download_from_s3(url, data_context): Downloads data from S3 URLs and loads into data_context
+- download_data_from_url(url, data_context): Universal function that handles both HTTP and S3 URLs
+- execute_duckdb_query(query, data_context): Execute SQL queries on DataFrames using DuckDB
+- is_s3_url(url): Check if a URL is an S3 URL
 
 Your capabilities:
-1. **Automatic URL Detection & Scraping**: Detect URLs in questions and automatically scrape data when no CSV files are provided
-2. **Web Scraping**: Use the scrape_web_data() helper function or pandas.read_html() to scrape tables from websites
-3. **File Processing**: Read CSV, JSON, and other data files using pandas
-4. **Database Queries**: Use DuckDB for SQL queries on large datasets or remote parquet files
-5. **Data Loading**: Process uploaded files and create DataFrames
+1. **S3 Data Access**: Download CSV, JSON, Parquet, Excel files from S3 buckets using s3:// URLs
+2. **Automatic URL Detection & Scraping**: Detect HTTP/HTTPS/S3 URLs in questions and automatically process data 
+3. **Web Scraping**: Use the scrape_web_data() helper function or pandas.read_html() to scrape tables from websites
+4. **Advanced SQL Queries**: Use DuckDB for complex SQL operations across multiple DataFrames
+5. **File Processing**: Read CSV, JSON, Parquet, Excel and other data files using pandas
+6. **Remote Parquet Files**: Query parquet files directly from S3 using DuckDB
+7. **Data Loading**: Process uploaded files and create DataFrames
 
 Code Templates:
 
@@ -534,16 +805,20 @@ Code Templates:
 detected_urls = detect_urls(questions)
 if detected_urls:
     for url in detected_urls:
-        scrape_result = scrape_web_data(url, data_context)
-        if scrape_result['success']:
-            data_context = scrape_result['data_context']
-            # Log what was scraped
-            scraped_info = []
-            for table_info in scrape_result['scraped_tables']:
-                scraped_info.append(f"{table_info['name']}: {table_info['shape']}")
-            result = f"Successfully scraped {len(scrape_result['scraped_tables'])} tables: {', '.join(scraped_info)}"
+        download_result = download_data_from_url(url, data_context)
+        if download_result['success']:
+            data_context = download_result['data_context']
+            if 'scraped_tables' in download_result:
+                # Web scraping result
+                scraped_info = []
+                for table_info in download_result['scraped_tables']:
+                    scraped_info.append(f"{table_info['name']}: {table_info['shape']}")
+                result = f"Successfully scraped {len(download_result['scraped_tables'])} tables: {', '.join(scraped_info)}"
+            else:
+                # S3 or other download result
+                result = f"Successfully downloaded data from {url}"
         else:
-            result = f"Failed to scrape {url}: {scrape_result['error']}"
+            result = f"Failed to process {url}: {download_result['error']}"
 
 # Direct web scraping example:
 # tables = pd.read_html(url)
@@ -555,11 +830,26 @@ if detected_urls:
 #             table[col] = pd.to_numeric(table[col], errors='coerce')
 #     data_context[f'scraped_table_{i+1}'] = table
 
-# DuckDB query example:
-# import duckdb
-# conn = duckdb.connect()
-# result = conn.execute("SELECT * FROM 'data.csv' LIMIT 10").fetchdf()
-# data_context['query_result'] = result
+# S3 download example:
+# s3_result = download_from_s3('s3://bucket-name/path/to/file.csv', data_context)
+# if s3_result['success']:
+#     data_context = s3_result['data_context']
+#     print(f"Downloaded: {s3_result['filename']}")
+
+# DuckDB query examples:
+# Basic query on loaded DataFrames:
+# query_result = execute_duckdb_query("SELECT * FROM data_csv LIMIT 10", data_context)
+# if query_result['success']:
+#     data_context = query_result['data_context']
+#     print(f"Query result shape: {query_result['result_shape']}")
+
+# Advanced DuckDB with joins:
+# query = "SELECT a.col1, b.col2 FROM table1 a JOIN table2 b ON a.id = b.id"
+# join_result = execute_duckdb_query(query, data_context)
+
+# Direct S3 parquet query (requires DuckDB S3 extension):
+# parquet_query = "SELECT * FROM 's3://bucket/path/file.parquet' LIMIT 100"
+# parquet_result = execute_duckdb_query(parquet_query, data_context)
 
 # File processing example:
 # df = pd.read_csv('filename.csv')
@@ -589,6 +879,11 @@ CRITICAL DATA TYPE SAFETY RULES:
 3. **Check for NaN values after conversion and handle them appropriately**
 4. **Never assume a column contains numeric data - always verify first**
 5. **Use try-except blocks for operations that might fail due to data types**
+
+MATPLOTLIB VISUALIZATION RULES:
+6. **ALWAYS use PNG format for matplotlib figures: plt.savefig(buffer, format='png', dpi=80)**
+7. **NEVER use quality parameter with plt.savefig() - it causes errors**
+8. **Use "data:image/png;base64,..." for base64 encoded images**
 
 Available imports and libraries:
 - pandas as pd
@@ -709,6 +1004,9 @@ VISUALIZATION GUIDELINES:
 - Use descriptive titles that relate to the questions
 - Keep image sizes under 100kB
 - Always use plt.close() after saving plots
+- **CRITICAL**: Use PNG format only for matplotlib figures: plt.savefig(buffer, format='png', dpi=80)
+- **NEVER** use quality parameter with matplotlib - it's not supported
+- For base64 encoding: use "data:image/png;base64,..." format
 
 DATA SAFETY RULES:
 - NEVER use .str accessor on columns without first checking if they are string type
