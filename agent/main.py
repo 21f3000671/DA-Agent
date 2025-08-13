@@ -875,10 +875,56 @@ INSTRUCTIONS:
                 return final_result
             else:
                 logger.error(f"Presentation failed: {exec_result['error']}")
+                # Try to return analysis results as fallback
+                if analysis_results:
+                    logger.info("Falling back to analysis results after presentation failure")
+                    return {
+                        "questions": [questions],
+                        "answers": ["Analysis completed but presentation failed. Raw results included."],
+                        "analysis_summary": f"Error in presentation: {exec_result['error']}",
+                        "raw_results": analysis_results
+                    }
                 return {"error": f"Presentation stage failed: {exec_result['error']}"}
         
-        # If no code was generated, return analysis results
-        return analysis_results or {"error": "No results generated"}
+        # If no presentation code was generated, format analysis results as a proper response
+        if analysis_results:
+            logger.info("No presentation code generated, formatting analysis results")
+            return {
+                "questions": [questions],
+                "answers": ["Analysis completed. See results below."],
+                "analysis_summary": "Data analysis performed successfully",
+                "data_insights": analysis_results,
+                "visualizations": []
+            }
+        
+        # If we have data context but no analysis results, provide basic data summary
+        if data_context:
+            logger.info("No analysis results, providing data summary")
+            data_summary_info = {}
+            for name, df in data_context.items():
+                if isinstance(df, pd.DataFrame):
+                    data_summary_info[name] = {
+                        "shape": df.shape,
+                        "columns": list(df.columns),
+                        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()}
+                    }
+            
+            return {
+                "questions": [questions],
+                "answers": ["Data loaded successfully. See summary below."],
+                "analysis_summary": "Data has been loaded and is ready for analysis",
+                "data_summary": data_summary_info,
+                "recommendations": ["Please provide more specific questions for detailed analysis"]
+            }
+        
+        # Final fallback - should rarely reach here
+        logger.warning("No results generated at any stage")
+        return {
+            "questions": [questions],
+            "answers": ["Unable to process the request. Please check your data and questions."],
+            "analysis_summary": "Processing incomplete",
+            "error_details": "No data or analysis results were generated"
+        }
         
     except Exception as e:
         logger.error(f"Error in three-stage agent: {e}")
